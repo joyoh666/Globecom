@@ -285,3 +285,57 @@ def run_motion(node, mode: str, scenario_id: int, duration: float, out_dir: Path
     (out_dir / "scenario_summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     print(f"[DONE] MOTION={mode} elapsed={summary['actual_elapsed_s']:.1f} s reached={reached} aborted={aborted}")
     return summary
+
+
+def retrace_motion(node, summary: dict, timeout: float) -> dict:
+    """Follow the measured odometry path in reverse and restore the start heading."""
+    start = summary["start_pose"]
+    origin = (start["x"], start["y"])
+    points = [origin]
+    path = Path(summary["trajectory_csv"])
+    if not path.is_file():
+        raise RuntimeError("복귀에 필요한 주행 기록이 없습니다")
+    with path.open(newline="") as f:
+        for row in csv.DictReader(f):
+            point = (float(row["x"]), float(row["y"]))
+            if math.dist(points[-1], point) >= 0.10:
+                points.append(point)
+
+    deadline = time.monotonic() + timeout
+    tolerance = 0.03
+
+    def return_pose():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"복귀 시간 초과 ({timeout:g}초)")
+        pose = node.get_pose()
+        if pose is None:
+            raise RuntimeError("복귀 중 odometry 위치를 읽을 수 없습니다")
+        if math.dist(pose[:2], origin) >= ts.HARD_RADIUS_M:
+            raise RuntimeError("복귀 중 주행 반경 한계를 초과했습니다")
+        return pose
+
+    try:
+        for target in reversed(points):
+            align = True
+            while True:
+                pose = return_pose()
+                v, w, _, _, align, state = ts._forward_drive_controller(
+                    pose, target, cruise_v=0.12, align_mode=align, tolerance=tolerance,
+                )
+                ts.publish_velocity(node, v, w)
+                if state == "REACHED":
+                    break
+                time.sleep(1.0 / ts.CONTROL_HZ)
+
+        while True:
+            pose = return_pose()
+            error = ts.wrap_pi(math.radians(start["yaw_deg"] - pose[2]))
+            if abs(error) <= math.radians(3):
+                break
+            ts.publish_velocity(node, 0.0, max(-ts.W_ALIGN, min(ts.W_ALIGN, 2.0 * error)))
+            time.sleep(1.0 / ts.CONTROL_HZ)
+    finally:
+        ts.stop_robot(node)
+
+    return {"status": "completed", "position_error_m": math.dist(pose[:2], origin),
+            "heading_error_deg": math.degrees(error)}

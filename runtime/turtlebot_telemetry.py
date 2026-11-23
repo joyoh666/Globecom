@@ -126,6 +126,9 @@ def main() -> int:
             rclpy.spin_once(node, timeout_sec=min(0.02, period))
             pose = node.pose()
             now_wall, now_mono = time.time(), time.monotonic()
+            # Re-reading the same TF would alternate false stops with velocity spikes.
+            if pose is not None and previous is not None and pose[3] == previous[0]:
+                pose = None
             if pose is not None:
                 x, y, yaw_deg, ros_time_s = pose
                 if start is None:
@@ -136,12 +139,12 @@ def main() -> int:
                 vx = vy = yaw_rate = 0.0
                 if previous is not None:
                     prev_t, prev_x, prev_y, prev_yaw = previous
-                    dt = now_mono - prev_t
+                    dt = ros_time_s - prev_t
                     if 1e-3 <= dt <= 1.0:
                         vx = (x - prev_x) / dt
                         vy = (y - prev_y) / dt
                         yaw_rate = wrap_deg(yaw_deg - prev_yaw) / dt
-                previous = (now_mono, x, y, yaw_deg)
+                previous = (ros_time_s, x, y, yaw_deg)
                 local_vx, local_vy = rotate_to_start(vx, vy, syaw)
                 speed = math.hypot(local_vx, local_vy)
                 movement_heading = (

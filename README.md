@@ -57,20 +57,20 @@ host PC가 로봇 제어까지 하는 기본 구성:
 DFT_MODE=geometry DURATION=180 MOTION=facing bash run_dft_measurement.sh
 ```
 
-로봇에서 위 텔레메트리 송신기를 따로 실행하는 구성:
+로봇에서 위 텔레메트리 송신기와 주행 시나리오를 실행하는 구성. 각 수집 전에 로봇을 RU 좌표를 측정할 때 사용한 출발 위치와 방향에 두고 텔레메트리 송신기를 시작한다. 송신기가 처음 읽은 자세가 좌표계의 원점과 +x 방향이 된다. 호스트는 기존 FDM 파일럿을 송신하면서 각 RU에 선택된 빔 하나를 적용한다.
 
 ```bash
 ROBOT_SOURCE=external DFT_MODE=geometry DURATION=180 bash run_dft_measurement.sh
 ```
 
-장비 없는 흐름 시험은 `DRY=1`을 추가한다. 결과는 `logs/dft_날짜_시간/`의 다음 파일이다.
+장비 없이 시험하려면 한 터미널에서 `python3 -m runtime.dft_beam_measurement --mode geometry --dry-run`을 실행하고, 다른 터미널에서 `python3 -m tools.dft_sim_sender --duration 10`을 실행한다. 실측 결과는 `logs/dft_날짜_시간/`에 저장된다.
 
-- `dft_measurements.csv`: 매 5 ms의 CSI, pose, RU별 거리/방향/이동, 적용 빔, 품질
+- `dft_measurements.csv`: 유효한 자세와 안정된 빔으로 수집한 CSI, RU별 거리/방향/이동, 적용 빔, 품질. CSI 입력 주기는 5 ms다.
 - `dft_sweeps.csv`: `DFT_MODE=sweep` 교정/평가 때만 sweep별 실측 최적 빔 기록
 - `dft_codebook.json`: 빔 class, DFT bin, 각도, 위상 증가량
 - `metadata.json`: 입력 schema, packet/drop 수, 실제 dry-run 여부
 
-geometry 방식은 RU 위치·boresight와 로봇 시작 좌표계가 정확해야 한다. `geometry_apply_lead_s`는 실제 적용 빔의 지연 보상 시간, `prediction_horizon_s`는 GRU가 예측할 미래 시간, `geometry_update_period_s`는 빔 갱신 주기다.
+geometry 모드는 CSI 수신 시점 이전의 최신 자세를 연결한다. 자세가 없거나 `pose_max_age_s`보다 오래된 경우와 빔 전환 후 `geometry_settle_s`(기본 50 ms) 이내에 받은 CSI는 저장에서 제외한다. 전환 대기값은 실장비에서 확인한 BBox와 CSI 전달 지연에 맞춘다. 적용 빔은 `ruN_beam`에, GRU용 미래 위치 기반 라벨은 `ruN_geometry_beam`에 기록한다. LOS를 가정한 수집에서 CSI는 선택된 빔의 수신 품질을 보여준다.
 
 다음 sweep 모드는 온라인 운용이 아니라 좌표/boresight 교정과 geometry 빔 대비 실제 최적 빔 성능평가용으로 남겨 두었다.
 

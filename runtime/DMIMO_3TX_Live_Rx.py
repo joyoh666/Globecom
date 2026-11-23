@@ -45,13 +45,9 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
-# 기본 실행은 1~75 중 중복 없이 5개를 고르는 배치 모드다. 각 측정은 기존의
-# 단일 시나리오 코드를 별도 프로세스로 실행한다. 로봇 자식 프로세스는 충전기에서
-# undock한 뒤 odometry로 시나리오를 실행하고, dock 완료를 확인해야 종료한다.
-# 따라서 배치는 이전 시나리오가 충전기에 복귀한 후에만 다음 자식을 실행한다.
+# 배치는 각 시나리오의 측정과 출발 위치 복귀가 끝난 뒤 다음 시나리오를 실행한다.
 BATCH_MODE = os.environ.get("BATCH_MODE", "0") == "1"   # [GC] 기본은 연속 모드
 BATCH_CHILD = os.environ.get("BATCH_CHILD", "0") == "1"
-ALLOW_DOCK_FAILURE = os.environ.get("ALLOW_DOCK_FAILURE", "1") == "1"
 
 
 def _resolve_batch_scenario_ids():
@@ -97,7 +93,7 @@ def _run_random_scenario_batch():
         "scenario_count": count,
         "scenario_seed": int(seed_text) if seed_text else None,
         "pose_source": "create3_odometry",
-        "start_and_return": "create3_dock_actions",
+        "start_and_return": "reverse_odometry_path",
         "completed": [],
         "status": "running",
     }
@@ -136,20 +132,6 @@ def _run_random_scenario_batch():
                 check=False,
             )
             if result.returncode != 0:
-                if ALLOW_DOCK_FAILURE:
-                    manifest["status"] = "completed_with_warnings"
-                    manifest.setdefault("warnings", []).append({
-                        "scenario_id": scenario_id,
-                        "reason": "child_process_returned_nonzero",
-                        "return_code": result.returncode,
-                    })
-                    save_manifest()
-                    print(
-                        f"[BATCH {run_index}/{count}] Scenario {scenario_id} returned {result.returncode}, but the batch continues because the dock cycle is intentionally disabled.",
-                        flush=True,
-                    )
-                    _open_plot_window_for_latest_scenario(batch_dir)
-                    continue
                 exit_code = result.returncode or 1
                 manifest["status"] = "failed"
                 manifest["failed_scenario_id"] = scenario_id
@@ -164,7 +146,7 @@ def _run_random_scenario_batch():
             manifest["completed"].append(scenario_id)
             save_manifest()
             print(
-                f"[BATCH {run_index}/{count}] Scenario {scenario_id} completed and docked successfully",
+                f"[BATCH {run_index}/{count}] Scenario {scenario_id} completed (including return for automatic motion)",
                 flush=True,
             )
             _open_plot_window_for_latest_scenario(batch_dir)
@@ -334,7 +316,7 @@ WINDOW_SEC = 0.005                 # 5 ms = 반 프레임 = 70 OFDM 심볼
 SYMS_PER_WINDOW = [1, 2, 3]        # 5 ms 마다 이 세 심볼에서 H 를 잰다 (프레임 첫 슬롯의 sync 심볼 5/6 은 피함)
 
 WAIT_POSE_TIMEOUT_SEC = 30.0
-DOCK_TIMEOUT_SEC = float(os.environ.get("DOCK_TIMEOUT_SEC", "60.0"))
+RETURN_TIMEOUT_SEC = float(os.environ.get("RETURN_TIMEOUT_SEC", str(3 * TOTAL_DURATION + 30)))
 RING_SECONDS = float(os.environ.get("RING_SECONDS", "4.0"))
 RECV_CHUNK = int(os.environ.get("RECV_CHUNK", "20000"))
 RX_TIMEOUT_SEC = 0.20
@@ -589,6 +571,7 @@ TX_BLOCK_FRAMES = int(os.environ.get("TX_BLOCK_FRAMES", "10"))   # send 한 번 
 tx_block = np.ascontiguousarray(np.tile(waveform, (1, TX_BLOCK_FRAMES)))
 tx_stop = threading.Event()
 tx_started = threading.Event()
+tx_stopped = threading.Event()
 tx_state = {"underflow": 0, "seq_err": 0, "time_err": 0, "error": None, "t_start": None}
 
 
@@ -619,8 +602,9 @@ def tx_thread_loop():
             md2 = uhd.types.TXMetadata()
             md2.end_of_burst = True
             tx_streamer.send(np.zeros((NUM_TX, 0), dtype=np.complex64), md2)
-        except Exception:
-            pass
+            tx_stopped.set()
+        except Exception as exc:
+            print("[TX] 종료 명령 실패:", repr(exc))
 
 
 def tx_async_loop():
@@ -665,7 +649,7 @@ out_dir.mkdir(parents=True, exist_ok=True)
 if ROBOT_PROC:
     import sys as _sys
     _here = Path(__file__).resolve().parent
-    print("Create 3 odometry 및 충전기 상태 수신 대기...")
+    print("Create 3 odometry 수신 대기...")
     robot_proc = subprocess.Popen([_sys.executable, "-u", "-m", "runtime.hy_robot_proc", str(SCENARIO_ID),
                                    str((out_dir / "scenario").resolve()), str(PRE_ROLL_SECONDS)],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1, cwd=str(_here.parent),
@@ -679,7 +663,7 @@ if ROBOT_PROC:
         print(_line)
     else:
         raise RuntimeError("로봇 프로세스가 READY 전에 끝났다")
-    print("충전기 출발 및 odometry 수신 OK.")
+    print("Create 3 odometry 수신 OK.")
 else:
     print("[NO_ROBOT] 터틀봇 없이 진행")
 
@@ -693,6 +677,7 @@ ring_peak = 0.0
 gap_log = []
 rx_lock = threading.Lock()
 rx_stop = threading.Event()
+rx_stopped = threading.Event()
 total_samples = 0
 ring_write_pos = 0
 time_usrp0 = None
@@ -775,6 +760,7 @@ def rx_thread_loop():
                     other_err_count += 1
     finally:
         rx_streamer.issue_stream_cmd(uhd.types.StreamCMD(uhd.types.StreamMode.stop_cont))
+        rx_stopped.set()
 
 
 rx_thread = threading.Thread(target=rx_thread_loop, daemon=True)
@@ -888,6 +874,8 @@ next_half_start_abs = frame0_start_abs + max(0, k0) * half_frame_samples
 
 usrp_rows = []   # (t_os, t_usrp, frame_idx, sym_in_frame, H_sc18, H_sc38, H_sc58)
 scenario_result = {}
+measurement_finished = threading.Event()
+return_pending = threading.Event()
 
 
 def _scenario_start_callback(t0_wall, t0_mono):
@@ -912,6 +900,11 @@ def run_scenario_proc(countdown, start_callback):
         if line.startswith("@@T0 "):
             _, w, m = line.split()
             cbd = start_callback(float(w), float(m))
+        elif line.startswith("@@MEASURED "):
+            scenario_result.update(json.loads(line[11:]))
+            scenario_result["callback_data"] = cbd
+            return_pending.set()
+            measurement_finished.set()
         elif line.startswith("@@DONE "):
             ev = json.loads(line[7:]); break
         elif line.startswith("@@ERROR"):
@@ -932,14 +925,17 @@ def _scenario_worker():
     except Exception as e:                                     # noqa: BLE001
         scenario_result["error"] = repr(e)
         print("[SCENARIO] ERROR:", repr(e))
+    finally:
+        measurement_finished.set()
 
 
 scenario_thread = threading.Thread(target=_scenario_worker, daemon=True)
 scenario_thread.start()
 t_run_start = time.monotonic()
+interrupted = False
 
 try:
-    while time.monotonic() - t_run_start < RUN_SECONDS:
+    while time.monotonic() - t_run_start < RUN_SECONDS and not scenario_result.get("error"):
         half_idx_global = int((next_half_start_abs - frame0_start_abs) // half_frame_samples)
         frame_idx = half_idx_global // 2
         window_start_sym = 0 if (half_idx_global % 2 == 0) else 70
@@ -953,6 +949,9 @@ try:
             with rx_lock:
                 have = total_samples
             if required_abs_end <= have and frame_start_abs >= have - ring_len:
+                break
+            if time.monotonic() - t_run_start >= RUN_SECONDS or scenario_result.get("error"):
+                skip = True
                 break
             if frame_start_abs < have - ring_len:              # 처리가 밀려 링 밖으로 나간 구간은 건너뛴다
                 skip = True
@@ -981,24 +980,50 @@ try:
                     pass
         next_half_start_abs += half_frame_samples
 except KeyboardInterrupt:
+    interrupted = True
+    scenario_result["error"] = "measurement interrupted"
     print("\n[INFO] KeyboardInterrupt: stopping early.")
 finally:
     rx_stop.set()
-    time.sleep(0.2)
     tx_stop.set()
+    rx_thread.join(timeout=2.0)
+    tx_thread.join(timeout=2.0)
+    tx_async_thread.join(timeout=1.0)
+    if robot_proc is not None and (sys.exc_info()[0] is not None or interrupted):
+        robot_proc.stdin.close()
 
-# 시나리오 종료 뒤 /dock 액션과 /dock_status 확인이 모두 끝나야
-# 자식 프로세스가 @@DONE을 보낸다. 그 전에 다음 배치를 시작하지 않는다.
-scenario_thread.join(timeout=(2.0 if NO_ROBOT else DOCK_TIMEOUT_SEC + 10.0))
-if scenario_thread.is_alive():
-    scenario_result["error"] = f"scenario/dock worker timeout ({DOCK_TIMEOUT_SEC:.1f}s)"
-    print("[SCENARIO] ERROR:", scenario_result["error"])
 if robot_proc is not None:
+    if not interrupted:
+        measurement_finished.wait(timeout=10.0)
+        if return_pending.is_set() and rx_stopped.is_set() and tx_stopped.is_set():
+            print("[RETURN] 송수신 종료. 출발 위치 복귀를 시작합니다.")
+            try:
+                robot_proc.stdin.write("RETURN\n")
+                robot_proc.stdin.flush()
+            except BrokenPipeError:
+                scenario_result["error"] = "robot process exited before return"
+        else:
+            scenario_result.setdefault("error", "measurement or USRP shutdown did not complete")
+        try:
+            robot_proc.stdin.close()
+        except BrokenPipeError:
+            pass
+    scenario_thread.join(timeout=RETURN_TIMEOUT_SEC + 5.0 if return_pending.is_set() else 2.0)
+    if scenario_thread.is_alive():
+        scenario_result["error"] = "robot process did not complete"
+        robot_proc.terminate()
     try:
-        robot_proc.wait(timeout=5.0)
-    except Exception:
+        if robot_proc.wait(timeout=5.0) != 0:
+            scenario_result.setdefault("error", "robot process failed")
+    except subprocess.TimeoutExpired:
         robot_proc.kill()
-tx_thread.join(timeout=2.0)
+        robot_proc.wait()
+        scenario_result.setdefault("error", "robot process shutdown timed out")
+else:
+    scenario_thread.join(timeout=2.0)
+
+if scenario_result.get("error"):
+    print("[SCENARIO] ERROR:", scenario_result["error"])
 
 robot_rows = []
 _raw = out_dir / "scenario" / "robot_states_raw.csv"
@@ -1079,8 +1104,7 @@ cfg = {
     "BATCH_ID": os.environ.get("BATCH_ID"),
     "POSE_SOURCE": "create3_odometry",
     "POSE_FRAME": "odom",
-    "DOCK_BETWEEN_SCENARIOS": True,
-    "DOCK_CYCLE": scenario_result.get("dock_cycle"),
+    "RETURN_PATH": scenario_result.get("return_path"),
     "ANT_TAG": ANT_TAG, "SCENARIO_DURATION_S": TOTAL_DURATION,
     "PRE_ROLL_SECONDS": PRE_ROLL_SECONDS, "POST_ROLL_SECONDS": POST_ROLL_SECONDS,
     "t0_wall": t0_wall, "t0_usrp_est": t0_usrp_est, "host_usrp_clock_map": clock_map,

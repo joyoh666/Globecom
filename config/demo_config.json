@@ -62,6 +62,7 @@
     "pose_max_age_s": 0.5,
     "geometry_apply_lead_s": 0.08,
     "geometry_update_period_s": 0.1,
+    "geometry_settle_s": 0.05,
     "predict_period_s": 0.1,
     "sequence_length": 40,
     "prediction_horizon_s": 0.25,

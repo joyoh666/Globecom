@@ -289,7 +289,7 @@ def _target_heading_and_distance(pose, target_frame: Tuple[float, float]):
 
 
 def _forward_drive_controller(pose, target_frame: Tuple[float, float], cruise_v: float,
-                              align_mode: bool) -> Tuple[float, float, float, float, bool, str]:
+                              align_mode: bool, tolerance: float = WAYPOINT_TOL_M) -> Tuple[float, float, float, float, bool, str]:
     """
     Translation-dominant waypoint controller.
 
@@ -300,7 +300,7 @@ def _forward_drive_controller(pose, target_frame: Tuple[float, float], cruise_v:
     dist, err = _target_heading_and_distance(pose, target_frame)
     abs_err = abs(err)
 
-    if dist <= WAYPOINT_TOL_M:
+    if dist <= tolerance:
         return 0.0, 0.0, dist, err, False, "REACHED"
 
     # Hysteresis prevents chatter between ALIGN and DRIVE.

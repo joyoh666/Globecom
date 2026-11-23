@@ -75,7 +75,7 @@ class Inputs:
         self.stop = threading.Event()
         self.csi: queue.Queue[tuple[float, float, int, int, np.ndarray]] = queue.Queue(maxsize=max_queue)
         self.pose_lock = threading.Lock()
-        self.pose: dict[str, Any] | None = None
+        self.poses: deque[dict[str, Any]] = deque(maxlen=512)
         self.fallback_start: tuple[float, float, float] | None = None
         self.csi_packets = 0
         self.csi_dropped = 0
@@ -153,14 +153,17 @@ class Inputs:
                     self.fallback_start = (x, y, yaw)
                 pose["_host_rx_time"] = recv_time
                 with self.pose_lock:
-                    self.pose = pose
+                    self.poses.append(pose)
                 self.pose_packets += 1
         finally:
             sock.close()
 
-    def latest_pose(self) -> dict[str, Any] | None:
+    def latest_pose(self, at_time: float) -> dict[str, Any] | None:
         with self.pose_lock:
-            return None if self.pose is None else dict(self.pose)
+            return next(
+                (pose for pose in reversed(self.poses) if pose["_host_rx_time"] <= at_time),
+                None,
+            )
 
     def close(self):
         self.stop.set()
@@ -169,7 +172,7 @@ class Inputs:
 
 
 def pose_in_start_frame(pose: dict[str, Any] | None, fallback_start, now: float, max_age_s: float) -> dict[str, float] | None:
-    if pose is None or now - float(pose.get("_host_rx_time", 0.0)) > max_age_s:
+    if pose is None or not 0.0 <= now - float(pose.get("_host_rx_time", 0.0)) <= max_age_s:
         return None
     x, y, yaw = float(pose["x"]), float(pose["y"]), float(pose["yaw_deg"])
     if all(k in pose for k in ("local_x", "local_y", "local_yaw_deg")):
@@ -184,6 +187,9 @@ def pose_in_start_frame(pose: dict[str, Any] | None, fallback_start, now: float,
         px, py = geo.odom_to_start(x, y, sx, sy, syaw)
         yaw_s = geo.wrap_deg(yaw - syaw)
         vx, vy = rotate_xy(float(pose.get("vx", 0.0)), float(pose.get("vy", 0.0)), syaw)
+    yaw_rate = float(pose.get("yaw_rate_dps", pose.get("vz", 0.0)))
+    if not all(math.isfinite(value) for value in (px, py, yaw_s, vx, vy, yaw_rate)):
+        return None
     return {
         "x": px,
         "y": py,
@@ -191,7 +197,7 @@ def pose_in_start_frame(pose: dict[str, Any] | None, fallback_start, now: float,
         "vx": vx,
         "vy": vy,
         # Legacy hy_robot_proc called angular velocity "vz".
-        "yaw_rate_dps": float(pose.get("yaw_rate_dps", pose.get("vz", 0.0))),
+        "yaw_rate_dps": yaw_rate,
         "age_ms": (now - float(pose["_host_rx_time"])) * 1e3,
         "source_ts": float(pose.get("ts", float("nan"))),
     }
@@ -295,23 +301,26 @@ class GeometryController:
         self.apply_lead_s = float(dcfg.get("geometry_apply_lead_s", 0.08))
         self.label_lead_s = float(dcfg.get("prediction_horizon_s", 0.25))
         self.period_s = float(dcfg.get("geometry_update_period_s", 0.1))
-        self.applied_target = {ru: self.cb.broadside_index for ru in hw.rus}
-        self.target = dict(self.applied_target)  # future geometry label for GRU
-        self.steering_deg = {ru: float("nan") for ru in hw.rus}
-        self.last_apply_ms = self.hw.apply(dict(self.applied_target))
+        self.settle_s = float(dcfg.get("geometry_settle_s", 0.05))
+        self.last_apply_ms = 0.0
+        self.ready_at = float("inf")
         self.next_update = 0.0
 
-    def update(self, pose: dict[str, float]) -> None:
+    def update(self, pose: dict[str, float]) -> bool:
         now = time.monotonic()
         if now < self.next_update:
-            return
+            return False
         self.next_update = now + self.period_s
-        applied, _ = geometry_beam_targets(self.hw.rus, pose, self.cb, self.apply_lead_s)
-        target, steering = geometry_beam_targets(self.hw.rus, pose, self.cb, self.label_lead_s)
-        changes = {ru: beam for ru, beam in applied.items() if beam != self.hw.current[ru]}
-        if changes:
-            self.last_apply_ms = self.hw.apply(changes)
-        self.applied_target, self.target, self.steering_deg = applied, target, steering
+        applied, _ = geometry_beam_targets(
+            self.hw.rus, pose, self.cb, self.apply_lead_s + pose["age_ms"] / 1e3
+        )
+        initial = math.isinf(self.ready_at)
+        changes = {ru: beam for ru, beam in applied.items() if initial or beam != self.hw.current[ru]}
+        if not changes:
+            return False
+        self.last_apply_ms = self.hw.apply(changes)
+        self.ready_at = time.time() + self.settle_s
+        return True
 
 
 class SweepController:
@@ -549,6 +558,7 @@ def main() -> int:
     start_mono = time.monotonic()
     next_predict = start_mono
     rows = 0
+    geometry_skipped = 0
     try:
         while not stop.is_set():
             if a.duration > 0 and time.monotonic() - start_mono >= a.duration:
@@ -557,10 +567,28 @@ def main() -> int:
                 sweep_controller.advance()
                 phase = sweep_controller.phase
                 last_apply_ms = sweep_controller.last_apply_ms
+            if geometry_controller is not None:
+                now = time.time()
+                control_pose = pose_in_start_frame(
+                    inputs.latest_pose(now), inputs.fallback_start, now, pose_max_age
+                )
+                if control_pose is not None and geometry_controller.update(control_pose):
+                    last_apply_ms = geometry_controller.last_apply_ms
+                    ema_q = dict.fromkeys(rus)
             try:
                 host_time, usrp_time, frame, half, h = inputs.csi.get(timeout=0.05)
             except queue.Empty:
                 continue
+
+            pose = pose_in_start_frame(inputs.latest_pose(host_time), inputs.fallback_start, host_time, pose_max_age)
+            geometry_labels, geometry_steering = {}, {}
+            if geometry_controller is not None:
+                if pose is None or host_time < geometry_controller.ready_at:
+                    geometry_skipped += 1
+                    continue
+                geometry_labels, geometry_steering = geometry_beam_targets(
+                    rus, pose, cb, geometry_controller.label_lead_s + pose["age_ms"] / 1e3
+                )
 
             raw_q = [quality_db(complex(v)) for v in h]
             for ru, value in zip(sorted(rus), raw_q):
@@ -569,14 +597,10 @@ def main() -> int:
             if sweep_controller is not None:
                 sweep_controller.observe(raw_q)
 
-            pose = pose_in_start_frame(inputs.latest_pose(), inputs.fallback_start, host_time, pose_max_age)
             if sweep_controller is not None and sweep_controller.phase == "waiting" and pose is not None:
                 sweep_controller.start()
                 phase = sweep_controller.phase
                 last_apply_ms = sweep_controller.last_apply_ms
-            if geometry_controller is not None and pose is not None:
-                geometry_controller.update(pose)
-                last_apply_ms = geometry_controller.last_apply_ms
             row: dict[str, Any] = {
                 "host_rx_time": host_time,
                 "csi_usrp_time": usrp_time,
@@ -604,8 +628,8 @@ def main() -> int:
                     prefix + "h_re": float(h[idx].real), prefix + "h_im": float(h[idx].imag),
                     prefix + "quality_db": smooth_q[idx], prefix + "beam": beam_class,
                     prefix + "dft_bin": beam.dft_bin, prefix + "beam_angle_deg": beam.angle_deg,
-                    prefix + "geometry_beam": geometry_controller.target[ru] if geometry_controller else "",
-                    prefix + "geometry_steer_deg": geometry_controller.steering_deg[ru] if geometry_controller else "",
+                    prefix + "geometry_beam": geometry_labels.get(ru, ""),
+                    prefix + "geometry_steer_deg": geometry_steering.get(ru, ""),
                     prefix + "oracle_beam": sweep_controller.latest_best[ru] if sweep_controller else "",
                     prefix + "predicted_beam": predicted[ru] if predicted[ru] is not None else "",
                     prefix + "prediction_confidence": confidence[ru],
@@ -657,6 +681,8 @@ def main() -> int:
             "radio_topology": cfg.get("radio_topology", {}),
             "label_source": "future_geometry" if a.mode == "geometry" else "measured_sweep" if a.mode == "sweep" else None,
             "geometry_apply_lead_s": float(cfg["dft_beam"].get("geometry_apply_lead_s", 0.08)),
+            "geometry_settle_s": geometry_controller.settle_s if geometry_controller else None,
+            "geometry_skipped_csi": geometry_skipped,
             "geometry_label_lead_s": float(cfg["dft_beam"].get("prediction_horizon_s", 0.25)),
             "rows": rows,
             "csi_packets": inputs.csi_packets,
