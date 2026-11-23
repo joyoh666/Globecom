@@ -1,0 +1,6 @@
+# Install the PyTorch wheel appropriate for the host/accelerator first if the
+# default package index does not provide it.  Collection/sweep mode only needs
+# NumPy; training and predict mode need PyTorch.
+numpy>=1.24
+torch>=2.1
+
