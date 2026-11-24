@@ -1,0 +1,40 @@
+{
+  "frequency_hz": 7400000000.0,
+  "upa": {
+    "rows": 4,
+    "columns": 4,
+    "element_spacing_m": 0.0185
+  },
+  "codebook": {
+    "oversampling": 4,
+    "max_abs_azimuth_deg": 60.0,
+    "max_abs_elevation_deg": 60.0
+  },
+  "ue_position_m": [0.5, 0.5, 0.8],
+  "rus": [
+    {
+      "id": 1,
+      "position_m": [2.5, 1.5, 1.5],
+      "boresight_azimuth_deg": -150.0,
+      "boresight_elevation_deg": -13.0,
+      "tx_phase_offset_deg": 0.0,
+      "predicted_csi_phase_error_deg": 0.0
+    },
+    {
+      "id": 2,
+      "position_m": [3.0, 0.0, 1.5],
+      "boresight_azimuth_deg": 180.0,
+      "boresight_elevation_deg": -13.0,
+      "tx_phase_offset_deg": 0.0,
+      "predicted_csi_phase_error_deg": 0.0
+    },
+    {
+      "id": 3,
+      "position_m": [2.5, -1.5, 1.5],
+      "boresight_azimuth_deg": 150.0,
+      "boresight_elevation_deg": -13.0,
+      "tx_phase_offset_deg": 0.0,
+      "predicted_csi_phase_error_deg": 0.0
+    }
+  ]
+}

@@ -102,6 +102,32 @@ trial이 둘 이상이면 validation trial 전체를 분리하고, 하나뿐이�
 
 geometry 계산만으로도 GRU 없이 빔 선택은 가능하다. GRU는 이동 이력, 방향 변화, 현재 빔 품질을 이용해 미래 bin을 예측하고 제어 지연을 흡수하는 경로다. 다만 geometry label만으로 학습하면 반사·차폐 때문에 LOS와 다른 빔이 더 좋은 상황은 배울 수 없다. 그런 channel-optimal 학습에는 일부 sweep/exploration trial을 추가해야 한다.
 
+### 실측 전: 3-RU 4×4 UPA 위치 기반 빔포밍 테스트
+
+`tools/position_beamforming_test.py`는 실제 BBox 연결과 별개로 **RU마다 16소자를 모두 독립 제어할 수 있는 full 4×4 UPA**를 가정한다. 7.4 GHz 단일경로 LOS/Friis 채널에서 UE 위치로 RU별 azimuth/elevation을 구하고, `(u,v)` 공간주파수가 가장 가까운 2-D DFT 빔을 선택한다. 다음 값을 동시에 비교한다.
+
+- 위치로 선택한 DFT 빔과 코드북을 전부 탐색한 oracle 빔
+- RU별 완전 CSI 기반 연속위상 MRT
+- **예측한 RU별 유효 CSI 위상으로 공통 위상을 보정한 coherent over-the-air sum**
+- 위상 보상 없는 direct sum, 가장 강한 단일 RU, perfect-phase DFT 상한, global MRT 상한
+- 전체 송신전력을 1로 고정하고 RU마다 1/3씩 할당한 공정한 비교
+
+RU/UE 좌표와 패널 방향은 `config/position_beamforming_test.json`에서 바꾼다. `boresight_azimuth_deg`는 +x에서 반시계 방향, `boresight_elevation_deg`는 위쪽이 +이며 위치 단위는 m다. 기본 DFT oversampling은 4다.
+RU별 BBox/LO/케이블 공통 위상을 시험하려면 각 RU의 `tx_phase_offset_deg`를 바꾼다. 이 값은 RU 내부 DFT 빔 모양은 바꾸지 않고 단일 UE 안테나에서의 복소 합만 바꾼다.
+유효 CSI 예측 오차의 영향은 RU별 `predicted_csi_phase_error_deg`로 넣는다. 선택 빔 뒤의 예측 유효 채널을 `g_hat_r`라 하면 RU 1을 기준으로 `alpha_r = angle(g_hat_1) - angle(g_hat_r)`를 계산하고, 최종 송신 가중치는 `w_r = f_DFT,r exp(j alpha_r) / sqrt(3)`이다. 즉 배열 내부 DFT 위상은 유지하면서 RU 전체에 공통 위상 하나를 추가한다.
+
+```bash
+python3 -m tools.position_beamforming_test
+python3 -m tools.position_beamforming_test --ue 0.2 -0.1 0.8 \
+  --json logs/position_test.json --csv logs/position_test.csv --plot
+python3 -m tools.position_beamforming_test --phase-errors-deg 0 10 -10 --plot
+python3 -m unittest tests.test_position_beamforming -v
+```
+
+`--plot`은 `plots/position_beamforming_result.svg`에 RU별 빔 이득과 `best RU / direct DFT sum / predicted-CSI coherent / perfect-phase bound / global MRT`를 저장한다. 다른 경로가 필요하면 `--plot <경로.svg>`로 지정한다.
+
+주 결과 `predicted_csi_precoded_gain`은 세 RU가 같은 심볼을 보내되 예측 유효 CSI로 보정한 `|sum(h_r^H f_r exp(j alpha_r))/sqrt(3)|^2`이다. UE는 안테나 1개이고 수신단 결합은 없다. 예측 유효 CSI 복소값을 직접 시험할 때는 `simulate_position(..., predicted_effective_channels=[...])`로 전달한다. `direct_superposition_gain`은 위상 보정 전 기준값이고, `phase-aligned DFT`는 오차 0°인 상한이다. 현재 실장비의 RU당 BBox 2대×4채널 구성은 full 4×4 독립 제어가 아니라 기존 `beam/dft_codebook.py`의 azimuth-only 4소자 모델을 사용해야 한다.
+
 ### 4. GRU 실시간 빔 예측/적용
 
 ```bash
