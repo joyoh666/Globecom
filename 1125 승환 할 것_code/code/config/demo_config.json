@@ -1,0 +1,41 @@
+{
+  "_note": "GC 1117. 좌표는 '이동 시작 자세' 기준 (로봇 출발점 = 원점, 로봇이 처음 바라본 방향 = +x, 왼쪽 = +y, 단위 m). RU 위치·방향·SN 은 현장에서 재서 채운다. phi_sign 과 theta/phi 대응은 첫날 확인 [모름].",
+  "freq": {"rf_ghz": 7.4, "if_ghz": 2.2, "lo_ghz": 9.6, "bw_mhz": 100},
+  "scenario": {"motion": "facing", "id": 72, "seed": 72, "face_dev_deg": 25, "duration_s": 60,
+               "_note": "FR3 데모 이동. facing = 로봇이 RU 쪽을 바라본 채 전진·후진 (seed 로 재현, UE 배열이 RU 를 늘 앞에 둠) · scenario = 75개 경로 중 id (사방을 봐서 RU 가 ±40° 안 14~28 %). 11-19 UE = 지향성 안테나 1개 → facing 유지 (안테나가 RU 를 등지지 않게). 학습 경로(scenario)와의 차이는 첫 시험에서 본다"},
+  "tmytek": {
+    "working_root": ".",
+    "udb": [
+      {"sn": "UDB_SN_1", "name": "UD#1 RU1+RU2", "role": "master"},
+      {"sn": "UDB_SN_2", "name": "UD#2 RU3",     "role": "slave"},
+      {"sn": "UDB_SN_3", "name": "UD#3 RX",      "role": "slave"}
+    ],
+    "_udb_note": "11-19 TMYTEK 제안: UD#1 2채널에 X310 #1 A·B (RU1·RU2) — 한 상자라 LO 공유. 4번째 UD 는 예비 (쓰려면 여기에 slave 로 추가). 마스터 10 MHz → 분배기 → UD#2·#3. 2채널을 setUDFreq 한 번으로 둘 다 잡는지는 현장 확인 [모름]",
+    "ref_khz": 10000,
+    "bbox": [
+      {"sn": "BBOX_SN_1A", "ru": 1, "row": "upper", "dphi_deg": 0.0},
+      {"sn": "BBOX_SN_1B", "ru": 1, "row": "lower", "dphi_deg": 0.0},
+      {"sn": "BBOX_SN_2A", "ru": 2, "row": "upper", "dphi_deg": 0.0},
+      {"sn": "BBOX_SN_2B", "ru": 2, "row": "lower", "dphi_deg": 0.0},
+      {"sn": "BBOX_SN_3A", "ru": 3, "row": "upper", "dphi_deg": 0.0},
+      {"sn": "BBOX_SN_3B", "ru": 3, "row": "lower", "dphi_deg": 0.0}
+    ],
+    "rx_bbox": [],
+    "_rx_note": "11-19: TMYTEK RX BBox 없음 (TX 6대만 준비) → UE = TMYTEK 6–30 GHz 지향성 안테나 1개 → UD#3 → X310 #3. UE 빔 없음 (안테나가 로봇 정면을 봄 → facing 이동으로 RU 쪽 유지). UPA 로 돌아가면 여기에 {\"sn\": ..., \"row\": \"ue\", \"dphi_deg\": 0.0} 와 4×1 chmap",
+    "_bbox_note": "FR3 (11-18 문서): 교정표·AAKit 없음. BBox 마다 선택 ip(스캔 없이 직결) · chmap [[x,y,\"H\"|\"V\"],...] (ch1~4 가 꽂힌 자리, 배열 뒤에서 본 왼쪽 위 (0,0), x 오른쪽·y 아래). chmap 이 없으면 row 로: upper = y0 줄 · lower = y1 줄 · ue = y0 줄 (H 1×4). UE 를 4×1 세로로 받으면 chmap [[0,0,\"H\"],[0,1,\"H\"],[0,2,\"H\"],[0,3,\"H\"]] — 방위로는 조향이 안 된다(넓게 듣기만)",
+    "tx_backoff_db": 30.0,
+    "rx_backoff_db": 10.0,
+    "_gain_note": "rx_backoff_db 는 rx_bbox 가 있을 때만 쓴다. BBox 이득 = 31 − backoff (FR3 감쇠기 0~31 dB, 최대 = 감쇠 0). 시작값 30/10 은 tools/level_budget.py 어림 (1.5 m 에서 RX IP1dB −32 dBm 아래 6 dB · X310 입력 ≤ −20 dBm) [추론]. 첫날 tools/fr3_check.py --sweep 으로 확정"
+  },
+  "geometry": {
+    "rus": [
+      {"ru": 1, "x": 2.5, "y": 1.5,  "boresight_deg": -150.0, "phi_sign": 1},
+      {"ru": 2, "x": 3.0, "y": 0.0,  "boresight_deg": 180.0,  "phi_sign": 1},
+      {"ru": 3, "x": 2.5, "y": -1.5, "boresight_deg": 150.0,  "phi_sign": 1}
+    ],
+    "rx": {"policy": "centroid", "mount_yaw_deg": 0.0, "phi_sign": 1, "fixed_deg": 0.0,
+           "_note": "rx_bbox 가 비면 안 쓴다 (11-19 UE = 안테나 1개). 옛 UE 4×4 UPA 용: mount_yaw = 로봇 정면 대비 배열 정면 [deg, 반시계 +]. policy: fixed(배열 정면 고정 + fixed_deg) | centroid(로봇 방향을 보정해 세 RU 의 가운데 쪽)"}
+  },
+  "_beam_note": "11-19 TMYTEK: 설정 → 연속 송신 전환이 수백 ms (PC 포함 추정), 그룹 목표 일괄 broadcast 를 TMYTEK 이 구현 중 · 최악이면 0° 고정만 (BEAM=fixed). rate_hz 10 은 실기에서 전환 시간 보고 낮춘다",
+  "beam": {"rate_hz": 10.0, "lead_s": 0.08, "step_deg": 2.0, "max_deg": 40.0}
+}

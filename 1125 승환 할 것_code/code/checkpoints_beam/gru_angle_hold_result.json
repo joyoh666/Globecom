@@ -1,0 +1,14 @@
+{
+  "name": "gru_angle_hold",
+  "best_epoch": 540,
+  "angle": true,
+  "future_angle": "hold",
+  "test_nmse_db": {
+    "+25ms": -19.96,
+    "+50ms": -14.49,
+    "+75ms": -11.01,
+    "+100ms": -8.51,
+    "+125ms": -6.72
+  },
+  "val_nmse_db_mean": -12.27
+}
